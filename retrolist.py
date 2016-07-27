@@ -3,8 +3,12 @@
 from __future__ import print_function
 import sys
 import crcmod
+from os import listdir, chdir, getcwd
+from os.path import isfile, join, basename, splitext
+import zipfile
+import zlib
 
-debug=0
+debug=1
 
 # debug, prints to stderr
 def eprint(*args, **kwargs):
@@ -47,8 +51,6 @@ root = tree.getroot()
 
 # compute the crc for all files in every rompath
 print('processing roms ...')
-from os import listdir, chdir
-from os.path import isfile, join, basename
 
 crc_file = {}
 pname_candidate = {}
@@ -56,6 +58,7 @@ pname_candidate = {}
 for rompath in sys.argv[4:]:
 	# lists all files within the directory
 	eprint('(path) loading roms from ' + rompath)
+	cwd = getcwd()
 	chdir(rompath)
 	for fname in filter(isfile, listdir('.')):
 		
@@ -120,7 +123,7 @@ for rompath in sys.argv[4:]:
 			eprint(' % with new candidate: ' + game_name)
 			pname_candidate[parent_name] = (game, fpath, crc_res)
 			
-	chdir('..')
+	chdir(cwd)
 
 print("writing playlist ...")
 
@@ -132,13 +135,19 @@ with open(playlist, 'w') as p:
 		(_, path, crc) = pname_candidate[pname]
 
 		# replace current path with the new one
-		path = join(file_prefix, basename(path))
+		zip_path = splitext(basename(path))[0] + '.zip'
 
-		p.write(path + '\n')
+		p.write(join(file_prefix, zip_path) + '#' + basename(path) + '\n')
 		p.write(pname + '\n')
 		p.write('DETECT\n')
 		p.write('DETECT\n')
 		p.write(crc + '|crc\n')
 		p.write(playlist + '\n')
+
+		# create a zip file in the current directory with the rom
+		print('writing file: ' + zip_path)
+		zf = zipfile.ZipFile(zip_path, mode='w')
+		zf.write(path, arcname=basename(path), compress_type=zipfile.ZIP_DEFLATED)
+		zf.close()
 
 print("done!")

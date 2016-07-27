@@ -11,11 +11,13 @@ The script used the information from a [DAT-o-MATIC](http://datomatic.no-intro.o
  - Specify the priority of those regions (i.e. prefer USA over Europe versions)
  - Select the parent version over the clones (e.g version 2 over version 1)
  - Choose released version over unreleased (i.e. betas, prototypes)
+
+After the playlist is generated, it creates a series of zip files for each of the selected files in the current directory, comprising the sanitized rom set.
  
 The software has been written using Python 2.7 in OS X, and it depends on crcmod to compute the CRC32 for the rom files, although alternatively it could used MD5.
 
 ## Usage
-The scrip accepts the following parameters
+The script accepts the following parameters
  - An XML file containing a parent/clone datafile
  - A prefix for the destination path
  - A series of directories containing the rom files
@@ -36,7 +38,7 @@ $ for i in *; do unzip -j "$i"; done
 ```
 $ ./retrolist.py database.xml playlist.lpl "/storage/roms/" roms/
 ```
- * Copy the playlist and the rom set to the Retroarch directory
+ * Copy the playlist and the sanitized rom set to the Retroarch directory
 
 ### version
 1.0
