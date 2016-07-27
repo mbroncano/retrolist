@@ -40,7 +40,8 @@ if len(sys.argv) < 3:
 	exit(1)
 
 # TODO: specify this as a parameter
-region_preference = ['USA', 'EUR', 'JPN'] # forget about the rest
+#region_preference = ['USA', 'EUR', 'JPN']
+region_preference = ['USA', 'EUR'] # filter out other regions, prefer USA over EUR
 
 # read the database file
 print('loading database ...')
@@ -84,15 +85,6 @@ for rompath in sys.argv[4:]:
 		else:
 			parent = game
 
-		# check if the there is no candidate already, add one
-		# note: we add the candidate even if it has no release (e.g. Prototipe, Beta)
-		# or if the region is not supported
-		parent_name = parent.attrib['name']
-		if parent_name not in pname_candidate:
-			pname_candidate[parent_name] = (game, fpath, crc_res)
-			eprint(' # added candidate: ' + game_name)
-			continue
-		
 		# check if the new candidate has a release, skip if not
 		# TODO: decide what to do when we have to choose between two release-less candidates
 		new_regions = map(lambda r: r.attrib['region'], game.findall('.//release'))
@@ -104,6 +96,14 @@ for rompath in sys.argv[4:]:
 		isect_regions = list(set(new_regions) & set(region_preference))
 		if not len(isect_regions):
 			eprint(' - no supported regions!')
+			continue
+		
+		# check if the there is no candidate already, add one
+		# note: we only add a candidate that contains a acceptable release
+		parent_name = parent.attrib['name']
+		if parent_name not in pname_candidate:
+			pname_candidate[parent_name] = (game, fpath, crc_res)
+			eprint(' # added candidate: ' + game_name)
 			continue
 
 		# get lowest index for region in new candidate
