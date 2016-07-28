@@ -29,6 +29,13 @@ def eprint(*args, **kwargs):
 def crc(fname):
 	hash_crc = crcmod.Crc(0x104c11db7, initCrc=0, xorOut=0xFFFFFFFF)
 	with open(fname, "rb") as f:
+		# ines detection, skip 16 first bytes
+		nes_header = f.read(16)
+		if nes_header[:4] == "\x4e\x45\x53\x1a":
+			eprint('(nes) {}x16kB ROM, {}x8kB VROM'.format(ord(nes_header[5]), ord(nes_header[6])))
+		else:
+			hash_crc.update(nes_header)
+
 		for chunk in iter(lambda: f.read(4096), b""):
 			hash_crc.update(chunk)
 	return hash_crc.hexdigest()
@@ -37,7 +44,7 @@ def verify_file(fname, crc_res):
 	# compute the crc and search for it in the database
 	game = root.find('.//rom[@crc="' + crc_res + '"]/..')
 	if game is None:
-		eprint('(not found) path: ' + fname)
+		eprint('(not found) path: ' + fname + ', crc: ' + crc_res)
 		return
 
 	game_name = game.attrib['name']
