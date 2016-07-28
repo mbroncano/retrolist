@@ -21,6 +21,22 @@ def eprint(*args, **kwargs):
 		print(*args, file=sys.stderr, **kwargs)
 	return
 
+def crc_file(f):
+	""" Computes CRC32 for a file object """
+	
+	hash_crc = crcmod.Crc(0x104c11db7, initCrc=0, xorOut=0xFFFFFFFF)
+	
+	# ines detection, skip 16 first bytes
+	nes_header = f.read(16)
+	if nes_header[:4] == "\x4e\x45\x53\x1a":
+		eprint('(nes) {}x16kB ROM, {}x8kB VROM'.format(ord(nes_header[5]), ord(nes_header[6])))
+	else:
+		hash_crc.update(nes_header)
+
+	for chunk in iter(lambda: f.read(4096), b""):
+		hash_crc.update(chunk)
+	return hash_crc.hexdigest()
+
 def crc(fname):
 	""" Compute the CRC32 for a file.
 
@@ -155,10 +171,16 @@ def verify_paths(path_list, dbroot):
 				eprint('zip: ' + fname)
 				zf = zipfile.ZipFile(fname)
 				for zipinfo in zf.infolist():
-					eprint(' * filename: ' + zipinfo.filename)
-					eprint(' * crc: {:X}'.format(zipinfo.CRC))
-					# TODO: this won't work for iNES files
-					verify_file(fname + '#' + zipinfo.filename, rompath, '{:X}'.format(zipinfo.CRC), dbroot, pname_candidate)
+					filename = zipinfo.filename
+					CRC = '{:X}'.format(zipinfo.CRC)
+					crc_res = crc_file(zf.open(zipinfo))
+
+					# for iNES the computed CRC differs
+					eprint(' * filename: ' + filename)
+					eprint(' * crc (zip): ' + CRC)
+					eprint(' # crc (nes): ' + crc_res)
+
+					verify_file(fname + '#' + zipinfo.filename, rompath, crc_res, dbroot, pname_candidate)
 			else:
 				eprint('file: ' + fname)
 				verify_file(fname, rompath, crc(fname), dbroot, pname_candidate)
