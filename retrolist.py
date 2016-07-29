@@ -21,17 +21,22 @@ def eprint(*args, **kwargs):
 		print(*args, file=sys.stderr, **kwargs)
 	return
 
+def is_ines(header):
+	""" Detects whether this is a iNES rom """
+	if header[:4] == "\x4e\x45\x53\x1a": # "NES^Z"
+		eprint('(nes) {}x16kB ROM, {}x8kB VROM'.format(ord(header[5]), ord(header[6])))
+		return True
+	return False
+
 def crc_file(f):
 	""" Computes CRC32 for a file object """
 	
 	hash_crc = crcmod.Crc(0x104c11db7, initCrc=0, xorOut=0xFFFFFFFF)
-	
+	header = f.read(16)
+
 	# ines detection, skip 16 first bytes
-	nes_header = f.read(16)
-	if nes_header[:4] == "\x4e\x45\x53\x1a":
-		eprint('(nes) {}x16kB ROM, {}x8kB VROM'.format(ord(nes_header[5]), ord(nes_header[6])))
-	else:
-		hash_crc.update(nes_header)
+	if not is_ines(header):
+		hash_crc.update(header)
 
 	for chunk in iter(lambda: f.read(4096), b""):
 		hash_crc.update(chunk)
@@ -50,18 +55,8 @@ def crc(fname):
 	Returns:
 		str: a hexadecimal string for the computed value
 	"""
-	hash_crc = crcmod.Crc(0x104c11db7, initCrc=0, xorOut=0xFFFFFFFF)
 	with open(fname, "rb") as f:
-		# ines detection, skip 16 first bytes
-		nes_header = f.read(16)
-		if nes_header[:4] == "\x4e\x45\x53\x1a":
-			eprint('(nes) {}x16kB ROM, {}x8kB VROM'.format(ord(nes_header[5]), ord(nes_header[6])))
-		else:
-			hash_crc.update(nes_header)
-
-		for chunk in iter(lambda: f.read(4096), b""):
-			hash_crc.update(chunk)
-	return hash_crc.hexdigest()
+		return crc_file(f)
 
 def verify_file(fname, rompath, crc_res, dbroot, pname_candidate):
 	""" Verifies that a file with a given CRC32 checksum matches a game entry in the database
@@ -233,7 +228,6 @@ if len(sys.argv) < 3:
 	print(sys.argv[0] + ': invalid number of arguments')
 	print('usage: ' + sys.argv[0] + ' playlist prefix database rompath ...')
 	exit(1)
-
 
 print('loading database ...')
 xml_root=load_database(sys.argv[3])
