@@ -1,244 +1,363 @@
 #!/usr/bin/python
 
-from __future__ import print_function
 import sys
 import crcmod
-from os import listdir, chdir, getcwd
-from os.path import isfile, join, basename, splitext
+from os import listdir, chdir, getcwd, makedirs
+from os.path import isfile, join, basename, splitext, exists
 import zipfile
 import zlib
 import shutil
 import xml.etree.ElementTree as ET
+import array
+import time
+import argparse
+import logging
 
 # TODO: specify this as a parameter
 region_preference = ['USA', 'EUR'] # filter out other regions, prefer USA over EUR
 
+logging.basicConfig(stream=sys.stderr, level=logging.DEBUG)
+
 debug=1
 
-def eprint(*args, **kwargs):
-	""" Debug print function """
-	if debug:
-		print(*args, file=sys.stderr, **kwargs)
-	return
-
 def is_ines(header):
-	""" Detects whether this is a iNES rom """
-	if header[:4] == "\x4e\x45\x53\x1a": # "NES^Z"
-		eprint('(nes) {}x16kB ROM, {}x8kB VROM'.format(ord(header[5]), ord(header[6])))
-		return True
-	return False
+    """ Detects whether this is a iNES rom """
+    if header[:4] == "\x4e\x45\x53\x1a": # "NES^Z"
+        logging.debug('(nes) {}x16kB ROM, {}x8kB VROM'.format(ord(header[5]), ord(header[6])))
+        return True
+    return False
+
+
+def is_n64(header):
+    if header[:4] == "\x40\x12\x37\x80":
+        logging.debug('(n64) detected .n64')
+        exit(2)
+        return True
+    return False
+
+
+def is_z64(header):
+    if header[:4] == "\x80\x37\x12\x40":
+        logging.debug('(n64) detected .z64')
+        return True
+    return False
+
+
+def is_v64(header):
+    if header[:4] == "\x37\x80\x40\x12":
+        logging.debug('(n64) detected .v64')
+        return True
+    return False
+
+
+def n64_correct(bytelist, swap):
+    buf = array.array(swap, bytelist)
+    buf.byteswap()
+    return buf.tostring()
+
 
 def crc_file(f):
-	""" Computes CRC32 for a file object """
-	
-	hash_crc = crcmod.Crc(0x104c11db7, initCrc=0, xorOut=0xFFFFFFFF)
-	header = f.read(16)
+    """ Computes CRC32 for a file object """
 
-	# ines detection, skip 16 first bytes
-	if not is_ines(header):
-		hash_crc.update(header)
+    hash_crc = crcmod.Crc(0x104c11db7, initCrc=0, xorOut=0xFFFFFFFF)
+    header = f.read(16)
 
-	for chunk in iter(lambda: f.read(4096), b""):
-		hash_crc.update(chunk)
-	return hash_crc.hexdigest()
+    swap = None
+    if is_z64(header):
+        swap = "H"
+    elif is_n64(header):
+        swap = "I"
+    elif is_v64(header):
+        logging.debug('(n64) no correction required')
+
+    # ines detection, skip 16 first bytes
+    if not is_ines(header):
+        if swap is not None:
+            header = n64_correct(header, swap)
+        hash_crc.update(header)
+
+    for chunk in iter(lambda: f.read(4096), b""):
+        if swap is not None:
+            chunk = n64_correct(chunk, swap)
+        hash_crc.update(chunk)
+    return hash_crc.hexdigest()
+
 
 def crc(fname):
-	""" Compute the CRC32 for a file.
+    """ Compute the CRC32 for a file.
 
-	This function computes the CRC32 for a file. If the file is detected to be a iNES file
-	(see http://wiki.nesdev.com/w/index.php/INES) then the header is not computed as part 
-	of the check, as required by emulators.
+    This function computes the CRC32 for a file. If the file is detected to be a iNES file
+    (see http://wiki.nesdev.com/w/index.php/INES) then the header is not computed as part
+    of the check, as required by emulators.
 
-	Args:
-		fname(str): the file path
+    Args:
+        fname(str): the file path
 
-	Returns:
-		str: a hexadecimal string for the computed value
-	"""
-	with open(fname, "rb") as f:
-		return crc_file(f)
+    Returns:
+        str: a hexadecimal string for the computed value
+    """
+    with open(fname, "rb") as f:
+        return crc_file(f)
+
 
 def verify_file(fname, rompath, crc_res, dbroot, pname_candidate):
-	""" Verifies that a file with a given CRC32 checksum matches a game entry in the database
+    """ Verifies that a file with a given CRC32 checksum matches a game entry in the database
 
-	This function check that a given file name matches a corresponding entry to its given CRC32
-	in the game parent/clone database. According to a number of aspects, it potentially replaces
-	an existing entry in a global dictionary that selects at the most a single ROM for all games.
+    This function check that a given file name matches a corresponding entry to its given CRC32
+    in the game parent/clone database. According to a number of aspects, it potentially replaces
+    an existing entry in a global dictionary that selects at the most a single ROM for all games.
 
-	Args:
-		fname(str): the file path
-		rompath(str): the directory name
-		crc_res(str): a hexadecimal string with a valid CRC32 checksum 
-		root(xml.etree.ElementTree): the parent/clone game database
-		pname_candidate(dict): a dict with key 'parent game name' and value
-			the triplet (game, fname, crc) of the current candidate
+    Args:
+        fname(str): the file path
+        rompath(str): the directory name
+        crc_res(str): a hexadecimal string with a valid CRC32 checksum
+        root(xml.etree.ElementTree): the parent/clone game database
+        pname_candidate(dict): a dict with key 'parent game name' and value
+            the triplet (game, fname, crc) of the current candidate
 
-	Returns:
-		nothing
-	"""
-	game = dbroot.find('.//rom[@crc="' + crc_res + '"]/..')
-	if game is None:
-		eprint('(not found) path: ' + fname + ', crc: ' + crc_res)
-		return
+    Returns:
+        nothing
+    """
+    game = dbroot.find('.//rom[@crc="' + crc_res + '"]/..')
+    if game is None:
+        logging.debug('(crc) not found! path: ' + fname + ', crc: ' + crc_res)
+        return
 
-	game_name = game.attrib['name']
-	eprint('(found) name: ' + game_name)
-	fpath = join(rompath, fname)
+    game_name = game.attrib['name']
+    logging.debug('(crc) file matches game: ' + game_name)
+    fpath = join(rompath, fname)
 
-	# check if it's a clone, set the parent accordingly
-	if 'cloneof' in game.attrib:
-		parent = dbroot.find('.//game[@name="' + game.attrib['cloneof'] + '"]')
-		eprint(' - parent: ' + parent.attrib['name'])
-	else:
-		parent = game
+    # check if it's a clone, set the parent accordingly
+    if 'cloneof' in game.attrib:
+        parent = dbroot.find('.//game[@name="' + game.attrib['cloneof'] + '"]')
+        logging.debug('(crc) - parent: ' + parent.attrib['name'])
+    else:
+        parent = game
 
-	# check if the new candidate has a release, skip if not
-	new_regions = map(lambda r: r.attrib['region'], game.findall('.//release'))
-	if not len(new_regions): 
-		eprint(' - no regions to compare! (and there is already a candidate)')
-		return
+    # check if the new candidate has a release, skip if not
+    new_regions = map(lambda r: r.attrib['region'], game.findall('.//release'))
+    if not len(new_regions):
+        logging.debug('(crc) - no regions to compare! (and there is already a candidate)')
+        return
 
-	# filter new candidate for supported regions
-	isect_regions = list(set(new_regions) & set(region_preference))
-	if not len(isect_regions):
-		eprint(' - no supported regions!')
-		return
-		
-	# check if the there is no candidate already, add one
-	# note: we only add a candidate that contains a acceptable release
-	parent_name = parent.attrib['name']
-	if parent_name not in pname_candidate:
-		pname_candidate[parent_name] = (game, fpath, crc_res)
-		eprint(' # added candidate: ' + game_name)
-		return
+    # filter new candidate for supported regions
+    isect_regions = list(set(new_regions) & set(region_preference))
+    if not len(isect_regions):
+        logging.debug('(crc) - no supported regions!')
+        return
 
-	# get lowest index for region in new candidate
-	new_index = reduce(min, map(lambda r: region_preference.index(r), isect_regions))
+    # check if the there is no candidate already, add one
+    # note: we only add a candidate that contains a acceptable release
+    parent_name = parent.attrib['name']
+    if parent_name not in pname_candidate:
+        pname_candidate[parent_name] = (game, fpath, crc_res)
+        logging.debug('(crc) - added candidate: ' + game_name)
+        return
 
-	# get supported regions for the current candidate 
-	(current_game, _, _) = pname_candidate[parent_name]
-	current_regions = filter(lambda r: r in region_preference, map(lambda r: r.attrib['region'], current_game.findall('.//release')))
-	if not len(current_regions):
-		current_index = 99999999
-	else:
-		current_index = reduce(min, map(lambda r: region_preference.index(r), current_regions))
+    # get lowest index for region in new candidate
+    new_index = reduce(min, map(lambda r: region_preference.index(r), isect_regions))
 
-	# replace the current candidate
-	if new_index < current_index:
-		eprint(' % replaced candidate: ' + current_game.attrib['name'])
-		eprint(' % with new candidate: ' + game_name)
-		pname_candidate[parent_name] = (game, fpath, crc_res)
+    # get supported regions for the current candidate
+    (current_game, _, _) = pname_candidate[parent_name]
+    current_regions = filter(lambda r: r in region_preference, map(lambda r: r.attrib['region'], current_game.findall('.//release')))
+    if not len(current_regions):
+        current_index = 99999999
+    else:
+        current_index = reduce(min, map(lambda r: region_preference.index(r), current_regions))
+
+    # replace the current candidate
+    if new_index < current_index:
+        logging.debug('(crc) - replaces candidate: ' + current_game.attrib['name'])
+        #logging.debug('(crc) - with new candidate: ' + game_name)
+        pname_candidate[parent_name] = (game, fpath, crc_res)
+    else:
+        logging.debug('(crc) - game ignored, current candidate: ' + current_game.attrib['name'])
+
 
 def load_database(dbpath):
-	""" Loads a parent/clone xml dat-o-matic type database 
+    """ Loads a parent/clone xml dat-o-matic type database
 
-	Args:
-		dbpath(str): the database file path
-	
-	Returns:
-		xml.etree.ElementTree: the root of the parsed XML tree
-	"""
+    Args:
+        dbpath(str): the database file path
 
-	# read the database file
-	tree = ET.parse(dbpath)
-	return tree.getroot()
+    Returns:
+        xml.etree.ElementTree: the root of the parsed XML tree
+    """
+
+    # read the database file
+    print('loading database: ' + args.database)
+    tree = ET.parse(dbpath)
+    root = tree.getroot()
+   
+    # extract some useful information 
+    games = root.findall('game')
+    clones = root.findall('game[@cloneof]')
+    regions = set(map(lambda x: x.attrib['region'], root.findall('.//release')))
+
+    # print some debug info
+    logging.debug('(xml) path: ' + dbpath);
+    logging.debug('(xml) - name: ' + root.find('.//header/name').text)
+    logging.debug('(xml) - desc: ' + root.find('.//header/description').text)
+    logging.debug('(xml) - games: total {} ({} parent / {} clones)'.format(len(games), len(games)-len(clones), len(clones)))
+    logging.debug('(xml) - regions: total {} ({})'.format(len(regions), ', '.join(sorted(regions))))
+
+    return root
+
 
 def verify_paths(path_list, dbroot):
-	""" Verifies a list of paths for valid ROMS against a database
+    """ Verifies a list of paths for valid ROMS against a database
 
-	Args:
-		path_list(list): a list of directories
+    Args:
+        path_list(list): a list of directories
+	dbroot(ElementTree): the root of the parsed XML tree
 
-	Returns:
-		dict: a dictionary with the candidate (game, fname, crc) for each game found
-	"""
+    Returns:
+        dict: a dictionary with the candidate (game, fname, crc) for each game found
+    """
 
-	pname_candidate = dict() 
-	for rompath in sys.argv[4:]:
-		# lists all files within the directory
-		eprint('(path) loading roms from ' + rompath)
-		cwd = getcwd()
-		chdir(rompath)
+    pname_candidate = dict()
+    for rompath in path_list:
+        print('processing path: ' + rompath)
 
-		for fname in filter(isfile, listdir('.')):
-			# process zip file as if it was a directory
-			if zipfile.is_zipfile(fname):
-				eprint('zip: ' + fname)
-				zf = zipfile.ZipFile(fname)
-				for zipinfo in zf.infolist():
-					filename = zipinfo.filename
-					CRC = '{:X}'.format(zipinfo.CRC)
-					crc_res = crc_file(zf.open(zipinfo))
+        # lists all files within the directory
+        logging.debug('(rom) loading roms from path: ' + rompath)
+        cwd = getcwd()
+        chdir(rompath)
 
-					# for iNES the computed CRC differs
-					eprint(' * filename: ' + filename)
-					eprint(' * crc (zip): ' + CRC)
-					eprint(' # crc (nes): ' + crc_res)
+        for fname in filter(isfile, listdir('.')):
+            # process zip file as if it was a directory
+            if zipfile.is_zipfile(fname):
+                logging.debug('(rom) checking files from zip archive: ' + fname)
+                zf = zipfile.ZipFile(fname)
+                for zipinfo in zf.infolist():
+                    filename = zipinfo.filename
+                    CRC = '{:X}'.format(zipinfo.CRC)
+                    crc_res = crc_file(zf.open(zipinfo))
 
-					verify_file(fname + '#' + zipinfo.filename, rompath, crc_res, dbroot, pname_candidate)
-			else:
-				eprint('file: ' + fname)
-				verify_file(fname, rompath, crc(fname), dbroot, pname_candidate)
-		chdir(cwd)
+                    # for iNES the computed CRC differs
+                    logging.debug('(zip) filename: ' + filename)
+                    logging.debug('(zip) - crc (zip): ' + CRC)
+                    logging.debug('(zip) - crc (nes): ' + crc_res)
 
-	return pname_candidate
+                    verify_file(fname + '#' + zipinfo.filename, rompath, crc_res, dbroot, pname_candidate)
+            else:
+                logging.debug('(rom) checking file name: ' + fname)
+                verify_file(fname, rompath, crc(fname), dbroot, pname_candidate)
+        chdir(cwd)
+
+    return pname_candidate
+
 
 def generate_playlist(pname_candidate, playlist, file_prefix):
-	""" Generates a Retroarch compatible playlist """
-	with open(playlist, 'w') as p:
-		for pname in sorted(pname_candidate):
-			(_, path, crc) = pname_candidate[pname]
+    """ Generates a Retroarch compatible playlist """
+    print("writing playlist ...")
+    with open(playlist, 'w') as p:
+        logging.debug('(lpl) creating playlist: ' + playlist)
+        for pname in sorted(pname_candidate):
+            (_, path, crc) = pname_candidate[pname]
 
-			archive_path = join(file_prefix, path)
+            if file_prefix:
+              archive_path = join(file_prefix, basename(path))
+            else:
+              archive_path = path 
 
-			# append new entry to the playlist
-			p.write(archive_path + '\n')
-			p.write(pname + '\n')
-			p.write('DETECT\n')
-			p.write('DETECT\n')
-			p.write(crc + '|crc\n')
-			p.write(playlist + '\n')
+            # append new entry to the playlist
+            p.write(archive_path + '\n')
+            p.write(pname + '\n')
+            p.write('DETECT\n')
+            p.write('DETECT\n')
+            p.write(crc + '|crc\n')
+            p.write(playlist + '\n')
+
+            logging.debug('(lpl) - adding game: ' + pname)
+
 
 def create_romset(pname_candidate, dest='.'):
-	""" Creates a romset out of a the games found and matched """
-	for pname in sorted(pname_candidate):
-		(_, path, crc) = pname_candidate[pname]
+    """ Creates a romset out of a the games found and matched """
+    print("creating romset ...")
+    for pname in sorted(pname_candidate):
+        (game, path, crc) = pname_candidate[pname]
 
-		# check if the file is already archived
-		path_split = path.split('.zip#')
-		if len(path_split) == 1:
-			# create a zip file in the current directory with the rom
-			zip_path = splitext(basename(path))[0] + '.zip'
-			archive_path = join(file_prefix, zip_path) + '#' + basename(path)
-		
-			print('writing file: ' + zip_path)
-			zf = zipfile.ZipFile(zip_path, mode='w')
-			zf.write(path, arcname=basename(path), compress_type=zipfile.ZIP_DEFLATED)
-			zf.close()
-		else:
-			# copy the zip file to the current directory
-			zip_path = path_split[0] + '.zip'
-			print('copying file: ' + zip_path)
-			shutil.copy(zip_path, dest)
-			archive_path = path
+        # retrieve the rom and game name
+        rom = game.find('./rom[@crc="' + crc + '"]')
+        rname = rom.attrib['name']
+        gname = game.attrib['name']
+        size = rom.attrib['size']
+
+        # check if the file is inside of a zip
+        path_split = path.split('.zip#')
+        if len(path_split) == 1:
+            # open the file
+            fo = open(path)
+            logging.debug('(set) compressing file: ' + path)
+        else:
+            # open the zip and the file
+            zo = zipfile.ZipFile(path_split[0] + '.zip', mode='r')
+            fo = zo.open(path_split[1])
+            logging.debug('(set) compressing file: ' + path_split[1])
+            logging.debug('(set) - in archive: ' + path_split[0] + '.zip')
+
+        # create a zip file in the destination directory with the rom name
+        zip_path = join(dest, gname + '.zip')
+        logging.debug('(set) destination zip archive: ' + zip_path)
+        zf = zipfile.ZipFile(zip_path, mode='w')
+
+        # use the rom name from the dat file also for the zipped file
+        zi = zipfile.ZipInfo(rname)
+        zi.date_time = time.localtime(time.time())[:6]
+        zi.compress_type = zipfile.ZIP_DEFLATED
+
+        # read whole file in memory (zip doesn't like appending)
+        fstr = fo.read()
+
+        # convert format for n64
+        swap = None
+        if is_z64(fstr[:8]):
+            swap = "H"
+        elif is_n64(fstr[:8]):
+            swap = "I"
+        elif is_v64(fstr[:8]):
+           logging.debug('(n64) - no correction required')
+
+        if swap is not None:
+            fstr = n64_correct(fstr, swap)
+            logging.debug('(n64) - file corrected!')
+
+        # write file
+        logging.debug('(set) - adding game: ' + gname) 
+        zf.writestr(zi, fstr)
+        zf.close()
+        logging.debug('(set) - archive closed correctly')
 
 
-# TODO: add parameter parsing
-if len(sys.argv) < 3:
-	print(sys.argv[0] + ': invalid number of arguments')
-	print('usage: ' + sys.argv[0] + ' playlist prefix database rompath ...')
-	exit(1)
+if __name__ == '__main__':
+    
+    # parse the given parameters in the command line
+    parser = argparse.ArgumentParser(description='Libretro romset manager')
+    parser.add_argument('database', help='the parent/clone xml database from no-intro.org')
+    parser.add_argument('rompath', nargs='+', help='the directories containing the rom files to be processed')
+    parser.add_argument('--playlist', help='the name of the playlist file')
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument('--romdir', help='the directory that will contain the romset')
+    group.add_argument('--prefix', help='the base path for the files in the playlist')
+    args = parser.parse_args()
 
-print('loading database ...')
-xml_root=load_database(sys.argv[3])
+    # load the database and compute the checksum for the given paths
+    xml_root = load_database(args.database)
+    pname_candidate = verify_paths(args.rompath, xml_root)
 
-print('processing roms ...')
-pname_candidate=verify_paths(sys.argv[4:], xml_root)
+    # generate the retroarch playlist
+    if args.playlist:
+      if args.romdir:
+        prefix = args.romdir
+      else:
+        prefix = args.prefix
+      generate_playlist(pname_candidate, args.playlist, prefix)
+   
+    # create the romset
+    if args.romdir:
+      # create the directory if it doesn't exist
+      if not exists(args.romdir):
+        makedirs(args.romdir)
+      create_romset(pname_candidate, args.romdir)
 
-print("writing playlist ...")
-generate_playlist(pname_candidate, sys.argv[1], sys.argv[2])
-
-print("creating romset ...")
-create_romset(pname_candidate)
-
-print("done!")
