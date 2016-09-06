@@ -12,13 +12,10 @@ import array
 import time
 import argparse
 import logging
-
-# TODO: specify this as a parameter
-region_preference = ['USA', 'EUR'] # filter out other regions, prefer USA over EUR
+import py7zlib
+import io
 
 logging.basicConfig(stream=sys.stderr, level=logging.DEBUG)
-
-debug=1
 
 def is_ines(header):
     """ Detects whether this is a iNES rom """
@@ -100,7 +97,7 @@ def crc(fname):
         return crc_file(f)
 
 
-def verify_file(fname, rompath, crc_res, dbroot, pname_candidate):
+def verify_file(fname, rompath, crc_res, dbroot, pname_candidate, region_preference):
     """ Verifies that a file with a given CRC32 checksum matches a game entry in the database
 
     This function check that a given file name matches a corresponding entry to its given CRC32
@@ -141,10 +138,16 @@ def verify_file(fname, rompath, crc_res, dbroot, pname_candidate):
         return
 
     # filter new candidate for supported regions
-    isect_regions = list(set(new_regions) & set(region_preference))
-    if not len(isect_regions):
+    if region_preference:
+      isect_regions = list(set(new_regions) & set(region_preference))
+      if not len(isect_regions):
         logging.debug('(crc) - no supported regions!')
         return
+      else:
+        logging.debug('(crc) - regions supported: ' + ', '.join(isect_regions))
+    else:
+      isect_regions = new_regions
+      logging.debug('(crc) - regions available: ' + ', '.join(isect_regions))
 
     # check if the there is no candidate already, add one
     # note: we only add a candidate that contains a acceptable release
@@ -153,6 +156,11 @@ def verify_file(fname, rompath, crc_res, dbroot, pname_candidate):
         pname_candidate[parent_name] = (game, fpath, crc_res)
         logging.debug('(crc) - added candidate: ' + game_name)
         return
+    
+    # if we don't filter regions, we always take the first candidate
+    if not len(region_preference):
+      logging.debug('(crc) - no region set specified, ignoring candidate: ' + current_game.attrib['name'])
+      return
 
     # get lowest index for region in new candidate
     new_index = reduce(min, map(lambda r: region_preference.index(r), isect_regions))
@@ -165,16 +173,18 @@ def verify_file(fname, rompath, crc_res, dbroot, pname_candidate):
     else:
         current_index = reduce(min, map(lambda r: region_preference.index(r), current_regions))
 
+    # this candidate has less priority
+    if new_index >= current_index:
+        logging.debug('(crc) - inferior region priority, ignoring candidate: ' + game_name)
+        return
+
     # replace the current candidate
-    if new_index < current_index:
-        logging.debug('(crc) - replaces candidate: ' + current_game.attrib['name'])
-        #logging.debug('(crc) - with new candidate: ' + game_name)
-        pname_candidate[parent_name] = (game, fpath, crc_res)
-    else:
-        logging.debug('(crc) - game ignored, current candidate: ' + current_game.attrib['name'])
+    logging.debug('(crc) - replaces candidate: ' + current_game.attrib['name'])
+    #logging.debug('(crc) - with new candidate: ' + game_name)
+    pname_candidate[parent_name] = (game, fpath, crc_res)
 
 
-def load_database(dbpath):
+def load_database(dbpath, region_priority, region_filter):
     """ Loads a parent/clone xml dat-o-matic type database
 
     Args:
@@ -192,24 +202,70 @@ def load_database(dbpath):
     # extract some useful information 
     games = root.findall('game')
     clones = root.findall('game[@cloneof]')
-    regions = set(map(lambda x: x.attrib['region'], root.findall('.//release')))
+    regions = sorted(set(map(lambda x: x.attrib['region'], root.findall('.//release'))))
 
     # print some debug info
     logging.debug('(xml) path: ' + dbpath);
     logging.debug('(xml) - name: ' + root.find('.//header/name').text)
     logging.debug('(xml) - desc: ' + root.find('.//header/description').text)
     logging.debug('(xml) - games: total {} ({} parent / {} clones)'.format(len(games), len(games)-len(clones), len(clones)))
-    logging.debug('(xml) - regions: total {} ({})'.format(len(regions), ', '.join(sorted(regions))))
+    logging.debug('(xml) - regions: total {} ({})'.format(len(regions), ', '.join(regions)))
 
-    return root
+    if len(region_priority):
+      regions = region_priority + list(set(regions) - set(region_priority))
+      logging.debug('(xml) - priority: {}'.format(', '.join(regions)))
+   
+    if len(region_filter):
+      regions = list(set(regions) & set(region_filter))
+      logging.debug('(xml) - filter: {}'.format(', '.join(regions)))
+
+    return root, regions
 
 
-def verify_paths(path_list, dbroot):
+def verify_archive(fname, fp, dbroot, regions, rompath, pname_candidate):
+    logging.debug('(arc) verifying: ' + fname)
+
+    try:
+        zf = zipfile.ZipFile(fp)
+        logging.debug('(zip) zip archive detected')
+        for zipinfo in zf.infolist():
+            logging.debug('(zip) filename: ' + zipinfo.filename)
+            logging.debug('(zip) - digest: {:X}'.format(zipinfo.CRC))
+            fp = io.BytesIO(zipinfo.read())
+            filename = fname + '#' + zipinfo.filename
+            verify_archive(filename, fp, dbroot, regions, rompath, pname_candidate)
+
+    except zipfile.BadZipfile:
+        pass
+        #logging.debug('(zip) not a zip file')
+
+    fp.seek(0)
+    try:
+        ar7z = py7zlib.Archive7z(fp)
+        logging.debug('(p7z) 7z archive detected')
+        for fp7z in ar7z.getmembers():
+            logging.debug('(p7z) filename: ' + fp7z.filename)
+            logging.debug('(p7z) - digest: {:X}'.format(fp7z.digest))
+            fp = io.BytesIO(fp7z.read())
+            filename = fname + '#' + fp7z.filename
+            verify_archive(filename, fp, dbroot, regions, rompath, pname_candidate)
+
+    except py7zlib.FormatError:
+        pass
+        #logging.debug('(p7z) not a 7z file')
+
+    # for iNES the computed CRC differs
+    fp.seek(0)
+    crc_res = crc_file(fp)
+    verify_file(fname, rompath, crc_res, dbroot, pname_candidate, regions)
+
+
+def verify_paths(path_list, dbroot, regions):
     """ Verifies a list of paths for valid ROMS against a database
 
     Args:
         path_list(list): a list of directories
-	dbroot(ElementTree): the root of the parsed XML tree
+        dbroot(ElementTree): the root of the parsed XML tree
 
     Returns:
         dict: a dictionary with the candidate (game, fname, crc) for each game found
@@ -225,6 +281,13 @@ def verify_paths(path_list, dbroot):
         chdir(rompath)
 
         for fname in filter(isfile, listdir('.')):
+            # check for archive file
+            logging.debug('(rom) checking for archive: ' + fname)
+            with open(fname) as fp:
+                verify_archive(fname, fp, dbroot, regions, rompath, pname_candidate)
+           
+            continue
+
             # process zip file as if it was a directory
             if zipfile.is_zipfile(fname):
                 logging.debug('(rom) checking files from zip archive: ' + fname)
@@ -239,10 +302,10 @@ def verify_paths(path_list, dbroot):
                     logging.debug('(zip) - crc (zip): ' + CRC)
                     logging.debug('(zip) - crc (nes): ' + crc_res)
 
-                    verify_file(fname + '#' + zipinfo.filename, rompath, crc_res, dbroot, pname_candidate)
+                    verify_file(fname + '#' + zipinfo.filename, rompath, crc_res, dbroot, pname_candidate, regions)
             else:
                 logging.debug('(rom) checking file name: ' + fname)
-                verify_file(fname, rompath, crc(fname), dbroot, pname_candidate)
+                verify_file(fname, rompath, crc(fname), dbroot, pname_candidate, regions)
         chdir(cwd)
 
     return pname_candidate
@@ -283,23 +346,26 @@ def create_romset(pname_candidate, dest='.'):
         rname = rom.attrib['name']
         gname = game.attrib['name']
         size = rom.attrib['size']
+       
+        logging.debug('(set) processing game: ' + gname) 
+        logging.debug('(set) - rom: ' + rname) 
+        logging.debug('(set) - crc: ' + crc) 
+        logging.debug('(set) - size: ' + size) 
+        logging.debug('(set) - path: ' + path)
 
         # check if the file is inside of a zip
         path_split = path.split('.zip#')
         if len(path_split) == 1:
             # open the file
             fo = open(path)
-            logging.debug('(set) compressing file: ' + path)
         else:
             # open the zip and the file
             zo = zipfile.ZipFile(path_split[0] + '.zip', mode='r')
             fo = zo.open(path_split[1])
-            logging.debug('(set) compressing file: ' + path_split[1])
-            logging.debug('(set) - in archive: ' + path_split[0] + '.zip')
 
         # create a zip file in the destination directory with the rom name
         zip_path = join(dest, gname + '.zip')
-        logging.debug('(set) destination zip archive: ' + zip_path)
+        logging.debug('(set) - archive: ' + zip_path)
         zf = zipfile.ZipFile(zip_path, mode='w')
 
         # use the rom name from the dat file also for the zipped file
@@ -340,11 +406,14 @@ if __name__ == '__main__':
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument('--romdir', help='the directory that will contain the romset')
     group.add_argument('--prefix', help='the base path for the files in the playlist')
+    group2 = parser.add_mutually_exclusive_group()
+    group2.add_argument('--priority', nargs='+', help='the regions that will be prioritized', default=['USA', 'EUR', 'JPN'])
+    group2.add_argument('--filter', nargs='+', help='the regions that will be included', default=[])
     args = parser.parse_args()
 
     # load the database and compute the checksum for the given paths
-    xml_root = load_database(args.database)
-    pname_candidate = verify_paths(args.rompath, xml_root)
+    xml_root, regions = load_database(args.database, args.priority, args.filter)
+    pname_candidate = verify_paths(args.rompath, xml_root, regions)
 
     # generate the retroarch playlist
     if args.playlist:
