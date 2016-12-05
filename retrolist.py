@@ -16,6 +16,10 @@ import py7zlib
 import io
 
 
+def is_game_name(name):
+    """ Identifies a Beta, BIOS, Prototype game """
+    return any(s in name for s in ['[BIOS]', '(Proto)', '(SDK Build)'])
+
 def is_ines(header):
     """ Detects whether this is a iNES rom """
     if header[:4] == "\x4e\x45\x53\x1a": # "NES^Z"
@@ -96,7 +100,7 @@ def crc(fname):
         return crc_file(f)
 
 
-def verify_file(fname, rompath, crc_res, dbroot, pname_candidate, region_preference):
+def verify_file(fname, rompath, crc_res, dbroot, pname_candidate, region_preference, include_bios):
     """ Verifies that a file with a given CRC32 checksum matches a game entry in the database
 
     This function check that a given file name matches a corresponding entry to its given CRC32
@@ -122,6 +126,11 @@ def verify_file(fname, rompath, crc_res, dbroot, pname_candidate, region_prefere
     game_name = game.attrib['name']
     logging.debug('(crc) file matches game: ' + game_name)
     fpath = join(rompath, fname)
+
+    # check if this is a bios file
+    if not include_bios and is_game_name(game_name):
+        logging.debug('(crc) - game name is either bios or prototype, skipping ...')
+        return
 
     # check if it's a clone, set the parent accordingly
     if 'cloneof' in game.attrib:
@@ -202,6 +211,7 @@ def load_database(dbpath, region_priority, region_filter):
     games = root.findall('game')
     clones = root.findall('game[@cloneof]')
     regions = sorted(set(map(lambda x: x.attrib['region'], root.findall('.//release'))))
+    bios = filter(lambda f: not is_game_name(f.attrib['name']), games)
 
     # print some debug info
     logging.debug('(xml) path: ' + dbpath);
@@ -209,11 +219,12 @@ def load_database(dbpath, region_priority, region_filter):
     logging.debug('(xml) - desc: ' + root.find('.//header/description').text)
     logging.debug('(xml) - games: total {} ({} parent / {} clones)'.format(len(games), len(games)-len(clones), len(clones)))
     logging.debug('(xml) - regions: total {} ({})'.format(len(regions), ', '.join(regions)))
+    logging.debug('(xml) - bios, beta, prototypes: total {}'.format(len(bios)))
 
     if len(region_priority):
       regions = region_priority + list(set(regions) - set(region_priority))
       logging.debug('(xml) - priority: {}'.format(', '.join(regions)))
-   
+
     if len(region_filter):
       regions = list(set(regions) & set(region_filter))
       logging.debug('(xml) - filter: {}'.format(', '.join(regions)))
@@ -221,7 +232,7 @@ def load_database(dbpath, region_priority, region_filter):
     return root, regions
 
 
-def verify_archive(fname, fp, dbroot, regions, rompath, pname_candidate):
+def verify_archive(fname, fp, dbroot, regions, bios_filter, rompath, pname_candidate):
     logging.debug('(arc) verifying: ' + fname)
 
     try:
@@ -232,7 +243,7 @@ def verify_archive(fname, fp, dbroot, regions, rompath, pname_candidate):
             logging.debug('(zip) - digest: {:X}'.format(zipinfo.CRC))
             with io.BytesIO(zf.read(zipinfo)) as new_fp:
                 new_fname = fname + '#' + zipinfo.filename
-                verify_archive(new_fname, new_fp, dbroot, regions, rompath, pname_candidate)
+                verify_archive(new_fname, new_fp, dbroot, regions, bios_filter, rompath, pname_candidate)
 
     except zipfile.BadZipfile:
         pass
@@ -247,7 +258,7 @@ def verify_archive(fname, fp, dbroot, regions, rompath, pname_candidate):
             logging.debug('(p7z) - digest: {:X}'.format(fp7z.digest))
             with io.BytesIO(fp7z.read()) as new_fp:
                 new_fname = fname + '#' + fp7z.filename
-                verify_archive(fname, new_fp, dbroot, regions, rompath, pname_candidate)
+                verify_archive(fname, new_fp, dbroot, regions, bios_filter, rompath, pname_candidate)
 
     except py7zlib.FormatError:
         pass
@@ -256,10 +267,10 @@ def verify_archive(fname, fp, dbroot, regions, rompath, pname_candidate):
     # for iNES the computed CRC differs
     fp.seek(0)
     crc_res = crc_file(fp)
-    verify_file(fname, rompath, crc_res, dbroot, pname_candidate, regions)
+    verify_file(fname, rompath, crc_res, dbroot, pname_candidate, regions, bios_filter)
 
 
-def verify_paths(path_list, dbroot, regions):
+def verify_paths(path_list, dbroot, regions, bios_filter):
     """ Verifies a list of paths for valid ROMS against a database
 
     Args:
@@ -283,7 +294,7 @@ def verify_paths(path_list, dbroot, regions):
             # check for archive file
             logging.debug('(rom) checking for archive: ' + fname)
             with open(fname) as fp:
-                verify_archive(fname, fp, dbroot, regions, rompath, pname_candidate)
+                verify_archive(fname, fp, dbroot, regions, bios_filter, rompath, pname_candidate)
 
             continue
 
@@ -401,13 +412,14 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Libretro romset manager')
     parser.add_argument('database', help='the parent/clone xml database from no-intro.org')
     parser.add_argument('rompath', nargs='+', help='the directories containing the rom files to be processed')
-    parser.add_argument('-l', '--playlist', help='create a playlist file with the selected games')
     group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument('-r', '--romdir', help='create a romset in the specified directory with the selected games')
-    group.add_argument('-x', '--prefix', help='the base path for the files in the playlist (e.g. /storage/roms/ for lakka.tv)')
+    group.add_argument('-r', '--romdir', help='create a romset in the specified directory with the game set')
+    group.add_argument('-l', '--playlist', help='create a playlist file with the game set', action='store_true')
     group2 = parser.add_mutually_exclusive_group()
     group2.add_argument('-p', '--priority', nargs='+', help='a list of the regions that will be prioritized', default=['USA', 'EUR', 'JPN'])
     group2.add_argument('-f', '--filter', nargs='+', help='a list of the regions that will be included', default=[])
+    parser.add_argument('-x', '--prefix', help='the base path for the files in the playlist (e.g. /storage/roms/ for lakka.tv)')
+    parser.add_argument('-b', '--bios', help='include games whose name contain the string [BIOS] in the game set', action='store_true')
     parser.add_argument('--verbose', '-v', action='count')
     args = parser.parse_args()
 
@@ -417,15 +429,20 @@ if __name__ == '__main__':
 
     # load the database and compute the checksum for the given paths
     xml_root, regions = load_database(args.database, args.priority, args.filter)
-    pname_candidate = verify_paths(args.rompath, xml_root, regions)
+    pname_candidate = verify_paths(args.rompath, xml_root, regions, args.bios)
+
+    # users the romdir as the default if the prefix is not present
+    if args.prefix:
+        prefix = args.prefix
+    elif args.romdir:
+        prefix = args.romdir
+    else:
+        prefix = ''
 
     # generate the retroarch playlist
     if args.playlist:
-      if args.romdir:
-        prefix = args.romdir
-      else:
-        prefix = args.prefix
-      generate_playlist(pname_candidate, args.playlist, prefix)
+      playlist_filename = xml_root.find('.//header/name').text + ".lpl"
+      generate_playlist(pname_candidate, playlist_filename, prefix)
    
     # create the romset
     if args.romdir:
