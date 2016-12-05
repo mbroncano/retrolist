@@ -15,7 +15,6 @@ import logging
 import py7zlib
 import io
 
-logging.basicConfig(stream=sys.stderr, level=logging.DEBUG)
 
 def is_ines(header):
     """ Detects whether this is a iNES rom """
@@ -231,9 +230,9 @@ def verify_archive(fname, fp, dbroot, regions, rompath, pname_candidate):
         for zipinfo in zf.infolist():
             logging.debug('(zip) filename: ' + zipinfo.filename)
             logging.debug('(zip) - digest: {:X}'.format(zipinfo.CRC))
-            fp = io.BytesIO(zipinfo.read())
-            filename = fname + '#' + zipinfo.filename
-            verify_archive(filename, fp, dbroot, regions, rompath, pname_candidate)
+            with io.BytesIO(zf.read(zipinfo)) as new_fp:
+                new_fname = fname + '#' + zipinfo.filename
+                verify_archive(new_fname, new_fp, dbroot, regions, rompath, pname_candidate)
 
     except zipfile.BadZipfile:
         pass
@@ -246,9 +245,9 @@ def verify_archive(fname, fp, dbroot, regions, rompath, pname_candidate):
         for fp7z in ar7z.getmembers():
             logging.debug('(p7z) filename: ' + fp7z.filename)
             logging.debug('(p7z) - digest: {:X}'.format(fp7z.digest))
-            fp = io.BytesIO(fp7z.read())
-            filename = fname + '#' + fp7z.filename
-            verify_archive(filename, fp, dbroot, regions, rompath, pname_candidate)
+            with io.BytesIO(fp7z.read()) as new_fp:
+                new_fname = fname + '#' + fp7z.filename
+                verify_archive(fname, new_fp, dbroot, regions, rompath, pname_candidate)
 
     except py7zlib.FormatError:
         pass
@@ -285,7 +284,7 @@ def verify_paths(path_list, dbroot, regions):
             logging.debug('(rom) checking for archive: ' + fname)
             with open(fname) as fp:
                 verify_archive(fname, fp, dbroot, regions, rompath, pname_candidate)
-           
+
             continue
 
             # process zip file as if it was a directory
@@ -346,7 +345,7 @@ def create_romset(pname_candidate, dest='.'):
         rname = rom.attrib['name']
         gname = game.attrib['name']
         size = rom.attrib['size']
-       
+
         logging.debug('(set) processing game: ' + gname) 
         logging.debug('(set) - rom: ' + rname) 
         logging.debug('(set) - crc: ' + crc) 
@@ -402,14 +401,19 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Libretro romset manager')
     parser.add_argument('database', help='the parent/clone xml database from no-intro.org')
     parser.add_argument('rompath', nargs='+', help='the directories containing the rom files to be processed')
-    parser.add_argument('--playlist', help='the name of the playlist file')
+    parser.add_argument('-l', '--playlist', help='create a playlist file with the selected games')
     group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument('--romdir', help='the directory that will contain the romset')
-    group.add_argument('--prefix', help='the base path for the files in the playlist')
+    group.add_argument('-r', '--romdir', help='create a romset in the specified directory with the selected games')
+    group.add_argument('-x', '--prefix', help='the base path for the files in the playlist (e.g. /storage/roms/ for lakka.tv)')
     group2 = parser.add_mutually_exclusive_group()
-    group2.add_argument('--priority', nargs='+', help='the regions that will be prioritized', default=['USA', 'EUR', 'JPN'])
-    group2.add_argument('--filter', nargs='+', help='the regions that will be included', default=[])
+    group2.add_argument('-p', '--priority', nargs='+', help='a list of the regions that will be prioritized', default=['USA', 'EUR', 'JPN'])
+    group2.add_argument('-f', '--filter', nargs='+', help='a list of the regions that will be included', default=[])
+    parser.add_argument('--verbose', '-v', action='count')
     args = parser.parse_args()
+
+    # set logging level
+    if args.verbose > 0:
+       logging.basicConfig(stream=sys.stderr, level=logging.DEBUG)
 
     # load the database and compute the checksum for the given paths
     xml_root, regions = load_database(args.database, args.priority, args.filter)
