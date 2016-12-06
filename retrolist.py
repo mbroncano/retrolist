@@ -14,6 +14,26 @@ import argparse
 import logging
 import py7zlib
 import io
+import cPickle
+import hashlib
+
+
+def display_message(text):
+    if logging.getLogger().getEffectiveLevel() != logging.DEBUG:
+        sys.stdout.write(text)
+        sys.stdout.flush()
+
+
+def display_step(text, value):
+    display_message('{0}:\t"{1}"\n'.format(text, value))
+
+
+def display_progress(text, index, total, length=40):
+    index += 1
+    bar_progress = length*index/total
+    text = '\r{0}:\t[{1}] ({2}/{3})'.format(text, '#'*bar_progress+'-'*(length-bar_progress), index, total)
+    display_message(text)
+    if index >= total: display_message('\n')
 
 
 def is_game_name(name):
@@ -203,7 +223,7 @@ def load_database(dbpath, region_priority, region_filter):
     """
 
     # read the database file
-    print('loading database: ' + args.database)
+    display_step('loading dat', args.database)
     tree = ET.parse(dbpath)
     root = tree.getroot()
    
@@ -213,7 +233,7 @@ def load_database(dbpath, region_priority, region_filter):
     regions = sorted(set(map(lambda x: x.attrib['region'], root.findall('.//release'))))
     bios = filter(lambda f: not is_game_name(f.attrib['name']), games)
 
-    # print some debug info
+    # display some debug info
     logging.debug('(xml) path: ' + dbpath);
     logging.debug('(xml) - name: ' + root.find('.//header/name').text)
     logging.debug('(xml) - desc: ' + root.find('.//header/description').text)
@@ -283,14 +303,17 @@ def verify_paths(path_list, dbroot, regions, bios_filter):
 
     pname_candidate = dict()
     for rompath in path_list:
-        print('processing path: ' + rompath)
+        display_step('check path', rompath)
 
         # lists all files within the directory
         logging.debug('(rom) loading roms from path: ' + rompath)
         cwd = getcwd()
         chdir(rompath)
 
-        for fname in filter(isfile, listdir('.')):
+        filelist = filter(isfile, listdir('.'))
+        for idx, fname in enumerate(filelist):
+            display_progress("verify path", idx, len(filelist))
+
             # check for archive file
             logging.debug('(rom) checking for archive: ' + fname)
             with open(fname) as fp:
@@ -323,10 +346,11 @@ def verify_paths(path_list, dbroot, regions, bios_filter):
 
 def generate_playlist(pname_candidate, playlist, file_prefix):
     """ Generates a Retroarch compatible playlist """
-    print("writing playlist ...")
     with open(playlist, 'w') as p:
         logging.debug('(lpl) creating playlist: ' + playlist)
-        for pname in sorted(pname_candidate):
+        for idx, pname in enumerate(sorted(pname_candidate)):
+            display_progress("create plist", idx, len(pname_candidate))
+
             (_, path, crc) = pname_candidate[pname]
 
             if file_prefix:
@@ -347,8 +371,9 @@ def generate_playlist(pname_candidate, playlist, file_prefix):
 
 def create_romset(pname_candidate, dest='.'):
     """ Creates a romset out of a the games found and matched """
-    print("creating romset ...")
-    for pname in sorted(pname_candidate):
+    for idx, pname in enumerate(sorted(pname_candidate)):
+        display_progress("create romset", idx, len(pname_candidate))
+
         (game, path, crc) = pname_candidate[pname]
 
         # retrieve the rom and game name
@@ -412,9 +437,8 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Libretro romset manager')
     parser.add_argument('database', help='the parent/clone xml database from no-intro.org')
     parser.add_argument('rompath', nargs='+', help='the directories containing the rom files to be processed')
-    group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument('-r', '--romdir', help='create a romset in the specified directory with the game set')
-    group.add_argument('-l', '--playlist', help='create a playlist file with the game set', action='store_true')
+    parser.add_argument('-r', '--romdir', help='create a romset in the specified directory with the game set', action='store_true')
+    parser.add_argument('-l', '--playlist', help='create a playlist file with the game set', action='store_true')
     group2 = parser.add_mutually_exclusive_group()
     group2.add_argument('-p', '--priority', nargs='+', help='a list of the regions that will be prioritized', default=['USA', 'EUR', 'JPN'])
     group2.add_argument('-f', '--filter', nargs='+', help='a list of the regions that will be included', default=[])
@@ -427,27 +451,41 @@ if __name__ == '__main__':
     if args.verbose > 0:
        logging.basicConfig(stream=sys.stderr, level=logging.DEBUG)
 
-    # load the database and compute the checksum for the given paths
+     # load the database and compute the checksum for the given paths
     xml_root, regions = load_database(args.database, args.priority, args.filter)
-    pname_candidate = verify_paths(args.rompath, xml_root, regions, args.bios)
 
-    # users the romdir as the default if the prefix is not present
-    if args.prefix:
-        prefix = args.prefix
-    elif args.romdir:
-        prefix = args.romdir
-    else:
-        prefix = ''
+    # compute checksum
+    pname_candidate = None
+    arguments = [args.database, args.rompath, args.priority, args.filter, args.bios]
+    cache_filename = '/tmp/' + hashlib.md5(cPickle.dumps(arguments)).hexdigest() + '.cache'
+    try:
+      with open(cache_filename, 'r') as dump:
+        display_step('load cache', cache_filename)
+        logging.debug('(pic) loading cache file ...')
+        pname_candidate = cPickle.loads(dump.read())
+        logging.debug('(pic) cache loaded!')
+    except:
+      logging.debug('(pic) error loading cache!')
+
+    if pname_candidate is None:
+      pname_candidate = verify_paths(args.rompath, xml_root, regions, args.bios)
+      with open(cache_filename, 'w') as dump:
+        display_step('save cache', cache_filename)
+        logging.debug('(pic) writing cache file ...')
+        dump.write(cPickle.dumps(pname_candidate))
+        logging.debug('(pic) cache written!')
 
     # generate the retroarch playlist
+    system_name = xml_root.find('.//header/name').text.split(' Parent-Clone')[0]
     if args.playlist:
-      playlist_filename = xml_root.find('.//header/name').text + ".lpl"
-      generate_playlist(pname_candidate, playlist_filename, prefix)
+      playlist_filename = system_name + ".lpl"
+      generate_playlist(pname_candidate, playlist_filename, args.prefix or '')
    
     # create the romset
     if args.romdir:
       # create the directory if it doesn't exist
-      if not exists(args.romdir):
-        makedirs(args.romdir)
-      create_romset(pname_candidate, args.romdir)
+      romdir = system_name
+      if not exists(romdir):
+        makedirs(romdir)
+      create_romset(pname_candidate, romdir)
 
